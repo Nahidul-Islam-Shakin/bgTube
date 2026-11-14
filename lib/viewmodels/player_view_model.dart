@@ -3,6 +3,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../js/scripts.dart';
 import '../services/native_player.dart';
+import '../services/navigation_policy.dart';
 
 class PlayerViewModel extends ChangeNotifier with WidgetsBindingObserver {
   PlayerViewModel(this._native) {
@@ -22,6 +23,7 @@ class PlayerViewModel extends ChangeNotifier with WidgetsBindingObserver {
   bool _inBackground = false;
   bool _isReady = false;
   String? _userAgent;
+  String _currentHost = 'm.youtube.com';
 
   /// Page load progress lives in its own notifier so that progress ticks
   /// only repaint the thin progress bar, not the whole UI.
@@ -35,6 +37,9 @@ class PlayerViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// False until the WebView user agent has been prepared (see [init]).
   bool get isReady => _isReady;
   String? get userAgent => _userAgent;
+
+  /// Host of the page currently shown (used by the navigation policy).
+  String get currentHost => _currentHost;
 
   // ---- Startup ------------------------------------------------------------
 
@@ -72,6 +77,27 @@ class PlayerViewModel extends ChangeNotifier with WidgetsBindingObserver {
   /// A new document replaces our injected JS state, so re-apply it.
   void onPageLoaded() {
     if (_inBackground) _run(Js.setBackground(true));
+  }
+
+  /// A full page load started: the previous document (and its media) is gone.
+  void onPageStarted(String host) {
+    if (host.isEmpty) return;
+    _currentHost = host;
+
+    final hadMedia = _isPlaying || _title.isNotEmpty;
+    if (hadMedia) {
+      _isPlaying = false;
+      _title = '';
+      _artist = '';
+      notifyListeners();
+    }
+
+    if (!NavigationPolicy.isYoutubeHost(host)) {
+      // Left YouTube: nothing can be playing, remove the notification.
+      _native.stopService();
+    } else if (hadMedia) {
+      _native.updatePlayback(title: 'YouTube', artist: '', playing: false);
+    }
   }
 
   dynamic _onPageMediaState(List<dynamic> args) {
@@ -121,9 +147,11 @@ class PlayerViewModel extends ChangeNotifier with WidgetsBindingObserver {
 
   // ---- Navigation ---------------------------------------------------------
 
-  Future<void> goHome() async => _web?.loadUrl(
-        urlRequest: URLRequest(url: WebUri(homeUrl)),
-      );
+  Future<void> goHome() => openUrl(homeUrl);
+
+  /// Loads [url] in the same WebView (used by Home and by the shortcuts).
+  Future<void> openUrl(String url) async =>
+      _web?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
 
   Future<void> reload() async => _web?.reload();
 

@@ -5,13 +5,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:provider/provider.dart';
 
+import '../js/adblock.dart';
 import '../js/scripts.dart';
+import '../models/shortcut.dart';
+import '../services/navigation_policy.dart';
 import '../viewmodels/player_view_model.dart';
+import '../viewmodels/settings_view_model.dart';
+import 'settings_page.dart';
 
 class HomePage extends StatelessWidget {
   const HomePage({super.key});
 
-  static InAppWebViewSettings _buildSettings(String? userAgent) =>
+  static InAppWebViewSettings _buildSettings({
+    required String? userAgent,
+    required bool adBlock,
+  }) =>
       InAppWebViewSettings(
         userAgent: userAgent ?? '', // Chrome-like UA so Google sign-in works
         javaScriptEnabled: true,
@@ -25,46 +33,47 @@ class HomePage extends StatelessWidget {
         supportZoom: false,
         builtInZoomControls: false,
         displayZoomControls: false,
-        // Low-end device: skip features this app never uses.
-        safeBrowsingEnabled: false, // we only allow a fixed host list anyway
+        // Safe Browsing stays ON now that shortcut sites can be opened.
         geolocationEnabled: false,
         allowFileAccess: false,
         allowContentAccess: false,
+        contentBlockers: adBlock ? AdBlock.contentBlockers : const [],
       );
 
-  /// The background-play script only runs on YouTube pages, so Google's
-  /// sign-in pages are left untouched.
+  /// These scripts only run on YouTube pages, so Google's sign-in pages and the
+  /// shortcut sites are left untouched.
   /// If audio stops with the screen off and `window.__bgtube` is undefined in
   /// the page console, these rules didn't match: remove `allowedOriginRules`.
-  static final UnmodifiableListView<UserScript> _userScripts =
-      UnmodifiableListView<UserScript>([
-    UserScript(
-      source: Js.documentStart,
-      injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-      forMainFrameOnly: true,
-      allowedOriginRules: {'https://*.youtube.com', 'https://youtube.com'},
-    ),
-  ]);
+  static const Set<String> _youtubeOrigins = {
+    'https://*.youtube.com',
+    'https://youtube.com',
+  };
 
-  /// Only these hosts may load in the main frame (YouTube + Google sign-in).
-  /// Everything else (ad click-outs, "open in app" deep links, ...) is cancelled.
-  static bool _isAllowedHost(String host) {
-    const suffixes = [
-      'youtube.com',
-      'youtu.be',
-      'google.com',
-      'gstatic.com',
-      'googlevideo.com',
-      'ytimg.com',
-      'googleusercontent.com',
-    ];
-    return suffixes.any((s) => host == s || host.endsWith('.$s'));
-  }
+  static final UserScript _backgroundScript = UserScript(
+    source: Js.documentStart,
+    injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+    forMainFrameOnly: true,
+    allowedOriginRules: _youtubeOrigins,
+  );
+
+  static final UserScript _adBlockScript = UserScript(
+    source: AdBlock.script,
+    injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+    forMainFrameOnly: true,
+    allowedOriginRules: _youtubeOrigins,
+  );
 
   @override
   Widget build(BuildContext context) {
     final vm = context.read<PlayerViewModel>();
-    final ready = context.select<PlayerViewModel, bool>((m) => m.isReady);
+    final playerReady = context.select<PlayerViewModel, bool>((m) => m.isReady);
+    final settingsReady =
+        context.select<SettingsViewModel, bool>((s) => s.isLoaded);
+    final adBlock =
+        context.select<SettingsViewModel, bool>((s) => s.adBlockEnabled);
+    final revision =
+        context.select<SettingsViewModel, int>((s) => s.webViewRevision);
+    final ready = playerReady && settingsReady;
 
     return PopScope(
       canPop: false,
@@ -76,6 +85,7 @@ class HomePage extends StatelessWidget {
           child: Column(
             children: [
               const _TopBar(),
+              const _ShortcutBar(),
               ValueListenableBuilder<double>(
                 valueListenable: vm.progress,
                 builder: (_, value, __) => value < 1
@@ -86,28 +96,36 @@ class HomePage extends StatelessWidget {
                 child: !ready
                     ? const Center(child: CircularProgressIndicator())
                     : InAppWebView(
+                        // A new key = a fresh WebView (used when ad blocking is toggled).
+                        key: ValueKey<int>(revision),
                         initialUrlRequest:
                             URLRequest(url: WebUri(PlayerViewModel.homeUrl)),
-                        initialSettings: _buildSettings(vm.userAgent),
-                        initialUserScripts: _userScripts,
+                        initialSettings: _buildSettings(
+                          userAgent: vm.userAgent,
+                          adBlock: adBlock,
+                        ),
+                        initialUserScripts: UnmodifiableListView<UserScript>([
+                          _backgroundScript,
+                          if (adBlock) _adBlockScript,
+                        ]),
                         onWebViewCreated: vm.onWebViewCreated,
                         onProgressChanged: (_, p) => vm.onProgressChanged(p),
+                        onLoadStart: (_, url) => vm.onPageStarted(url?.host ?? ''),
                         onLoadStop: (_, __) => vm.onPageLoaded(),
                         shouldOverrideUrlLoading: (controller, action) async {
                           final uri = action.request.url;
                           if (uri == null) return NavigationActionPolicy.CANCEL;
-                          if (uri.scheme == 'about') {
-                            return NavigationActionPolicy.ALLOW;
+                          final allowed = NavigationPolicy.allow(
+                            scheme: uri.scheme,
+                            host: uri.host,
+                            currentHost: vm.currentHost,
+                          );
+                          if (!allowed && kDebugMode) {
+                            debugPrint('Blocked navigation: $uri');
                           }
-                          final isWeb =
-                              uri.scheme == 'http' || uri.scheme == 'https';
-                          if (isWeb && _isAllowedHost(uri.host)) {
-                            return NavigationActionPolicy.ALLOW;
-                          }
-                          // If a sign-in step silently goes nowhere, check
-                          // this log line and add the host to the list above.
-                          if (kDebugMode) debugPrint('Blocked navigation: $uri');
-                          return NavigationActionPolicy.CANCEL;
+                          return allowed
+                              ? NavigationActionPolicy.ALLOW
+                              : NavigationActionPolicy.CANCEL;
                         },
                       ),
               ),
@@ -132,7 +150,7 @@ class _TopBar extends StatelessWidget {
         child: Row(
           children: [
             IconButton(
-              tooltip: 'Home',
+              tooltip: 'YouTube home',
               icon: const Icon(Icons.home_outlined),
               onPressed: vm.goHome,
             ),
@@ -160,7 +178,47 @@ class _TopBar extends StatelessWidget {
                 icon: const Icon(Icons.battery_alert),
                 onPressed: vm.requestBatteryExemption,
               ),
+            IconButton(
+              tooltip: 'Settings',
+              icon: const Icon(Icons.settings_outlined),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
+              ),
+            ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Second row of the app bar: the user's shortcuts (hidden when there are none).
+class _ShortcutBar extends StatelessWidget {
+  const _ShortcutBar();
+
+  @override
+  Widget build(BuildContext context) {
+    final shortcuts =
+        context.select<SettingsViewModel, List<Shortcut>>((s) => s.shortcuts);
+    if (shortcuts.isEmpty) return const SizedBox.shrink();
+
+    final player = context.read<PlayerViewModel>();
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainer,
+      child: SizedBox(
+        height: 44,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          itemCount: shortcuts.length,
+          separatorBuilder: (_, __) => const SizedBox(width: 8),
+          itemBuilder: (_, i) {
+            final shortcut = shortcuts[i];
+            return ActionChip(
+              label: Text(shortcut.name),
+              onPressed: () => player.openUrl(shortcut.url),
+            );
+          },
         ),
       ),
     );

@@ -55,6 +55,9 @@ class PlaybackService : Service() {
         /** Release wake/wifi locks this long after pausing (covers track changes). */
         private const val LOCK_RELEASE_DELAY_MS = 90_000L
 
+        /** End the service (and its notification) after this long without playback. */
+        private const val IDLE_STOP_DELAY_MS = 10 * 60_000L
+
         @Volatile
         var instance: PlaybackService? = null
             private set
@@ -79,6 +82,7 @@ class PlaybackService : Service() {
     private var playing = false
 
     private val releaseLocksRunnable = Runnable { releaseLocks() }
+    private val idleStopRunnable = Runnable { shutdown() }
 
     private val noisyReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -226,10 +230,12 @@ class PlaybackService : Service() {
         )
 
         handler.removeCallbacks(releaseLocksRunnable)
+        handler.removeCallbacks(idleStopRunnable)
         if (playing) {
             acquireLocks()
         } else {
             handler.postDelayed(releaseLocksRunnable, LOCK_RELEASE_DELAY_MS)
+            handler.postDelayed(idleStopRunnable, IDLE_STOP_DELAY_MS)
         }
     }
 

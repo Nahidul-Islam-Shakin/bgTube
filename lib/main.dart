@@ -4,7 +4,9 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:provider/provider.dart';
 
 import 'services/native_player.dart';
+import 'services/settings_repository.dart';
 import 'viewmodels/player_view_model.dart';
+import 'viewmodels/settings_view_model.dart';
 import 'views/home_page.dart';
 
 Future<void> main() async {
@@ -16,8 +18,15 @@ Future<void> main() async {
   }
 
   runApp(
-    ChangeNotifierProvider(
-      create: (_) => PlayerViewModel(NativePlayer())..init(),
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(
+          create: (_) => PlayerViewModel(NativePlayer())..init(),
+        ),
+        ChangeNotifierProvider(
+          create: (_) => SettingsViewModel(SettingsRepository())..load(),
+        ),
+      ],
       child: const BgTubeApp(),
     ),
   );
